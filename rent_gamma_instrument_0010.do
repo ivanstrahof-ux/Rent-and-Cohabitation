@@ -15,9 +15,22 @@ local cyclewt     0       // 1 = weight the cycle by renter households; 0 = equa
 local buffer      1       // gamma_lo drops years with |year - target| <= buffer
 local minobs      6       // min annual changes to estimate a metro's gamma
 
+* 2SLS (steps 8-9)
+local extract_p   "`extract'"   // person records with: year perwt gq age marst sploc
+                                //   cpuma0010 migrate1d migplac1 migpuma1
+                                //   migrate1d_sp migplac1_sp migpuma1_sp
+local agecuts     18 25 35 45   // age groups 18-24, 25-34, 35-44
+local exposure    avg     // avg = mean of years t-1 and t (move-ins reported in year t
+                          //   happened in the 12 months before the interview); cur = year t
+local vintfe      0       // 1 = metro x MIGPUMA-vintage FE (MIGPUMA boundaries change in 2012)
+
 capture mkdir "`outdir'"
 if !inlist("`cyclevel'", "region", "division") {
     di as error "cyclevel must be region or division"
+    exit 198
+}
+if !inlist("`exposure'", "avg", "cur") {
+    di as error "exposure must be avg or cur"
     exit 198
 }
 
@@ -196,7 +209,7 @@ if `addmsa' == 1 {
         gen double commission_c    = 1 - inside / apop
         gen double mismatch_census = omission_c + commission_c
         keep metro src omission_c commission_c mismatch_census
-        save "`outdir'/metro_coverage_census.dta", replace
+        save "`outdir'/metro_coverage_census0010.dta", replace
     restore
 }
 
@@ -223,14 +236,14 @@ preserve
     merge 1:1 metro using `om', nogen keep(master match)
     gen double mismatch = omission + commission
     if `addmsa' == 1 {
-        merge 1:1 metro using "`outdir'/metro_coverage_census.dta", nogen ///
+        merge 1:1 metro using "`outdir'/metro_coverage_census0010.dta", nogen ///
             keep(master match) keepusing(omission_c commission_c mismatch_census)
         replace omission   = omission_c      if src == 2
         replace commission = commission_c    if src == 2
         replace mismatch   = mismatch_census if src == 2
         drop omission_c commission_c
     }
-    save "`outdir'/metro_coverage.dta", replace
+    save "`outdir'/metro_coverage0010.dta", replace
     di as txt _n "Coverage of CPUMA-based metros:"
     summarize omission commission mismatch, detail
     if `addmsa' == 1 {
@@ -269,7 +282,7 @@ preserve
     bysort metro (hh): keep if _n == _N
     gen byte region = cond(division <= 2, 1, cond(division <= 4, 2, cond(division <= 7, 3, 4)))
     keep metro division region
-    save "`outdir'/metro_division.dta", replace
+    save "`outdir'/metro_division0010.dta", replace
 restore
 drop division
 
@@ -313,8 +326,8 @@ bysort metro: egen int nyr = count(lnR)
 keep if nyr == `nyrs'
 drop nyr
 
-merge m:1 metro using "`outdir'/metro_division.dta", nogen keep(match)
-merge m:1 metro using "`outdir'/metro_coverage.dta", nogen keep(master match) ///
+merge m:1 metro using "`outdir'/metro_division0010.dta", nogen keep(match)
+merge m:1 metro using "`outdir'/metro_coverage0010.dta", nogen keep(master match) ///
     keepusing(mismatch src)
 if `maxmismatch' < . {
     drop if mismatch > `maxmismatch' & mismatch < .
@@ -431,7 +444,7 @@ label var src        "Source of the metro assignment"
 sort metro year
 order metro year src division region lnR p L_lo P_lo L_reg P_reg gamma_lo gamma_full ///
     Z_lvl Z_chg Z_lvl_full Z_chg_full
-save "`outdir'/rent_instrument_metro_year.dta", replace
+save "`outdir'/rent_instrument_metro_year0010.dta", replace
 
 preserve
     collapse (first) gamma_full (mean) gamma_lo_mean = gamma_lo, by(metro)
@@ -452,18 +465,191 @@ foreach z in Z_chg Z_chg_full {
     di as txt "First-stage F, `z': " as res %9.1f (_b[`z'] / _se[`z'])^2
 }
 
-use "rent_gamma_out/rent_instrument_metro_year.dta", clear
+*------------------------------------------------------------------------------
+* 8. Outcomes from ACS person records: people who started living with an
+*    unmarried partner in the 12 months before the interview.
+*    One row per metro x year x age group.
+*------------------------------------------------------------------------------
+local nag    : word count `agecuts'
+local agemin : word 1 of `agecuts'
+local agemax : word `nag' of `agecuts'
 
-* Reliability of gamma in the 89-metro sample
+use year perwt gq age marst sploc cpuma0010                          ///
+    migrate1d migplac1 migpuma1 migrate1d_sp migplac1_sp migpuma1_sp ///
+    if year >= `firstyear' & inlist(gq, 1, 2, 5)                      ///
+       & age >= `agemin' & age < `agemax'                             ///
+    using "`extract_p'", clear
+if `use2020' == 0 {
+    drop if year == 2020
+}
+
+merge m:1 cpuma0010 using "`outdir'/cpuma0010_to_met2013.dta", ///
+    keepusing(metro) keep(match) nogen
+drop if metro == .
+
+* Unmarried partner present (SPLOC links the householder and an unmarried
+* partner). A mover is anyone not in the same house a year ago.
+gen byte cohab       = sploc > 0 & marst > 2
+gen byte moved       = migrate1d    != 10
+gen byte moved_sp    = migrate1d_sp != 10
+gen byte diff_origin = migplac1 != migplac1_sp | migpuma1 != migpuma1_sp
+
+gen byte new_one  = cohab & (moved + moved_sp == 1)           // one partner moved in
+gen byte new_both = cohab & moved & moved_sp &  diff_origin   // both moved, from different places
+gen byte amb      = cohab & moved & moved_sp & !diff_origin   // both moved, same MIGPUMA
+
+* p: among couples where one partner moved in, the weighted share whose mover
+* came from the stayer's own migration PUMA. MIGRATE1D 23 = moved within the
+* state and within the PUMA (check with -label list-); 25 and 90 can't be placed.
+* Pooled across years within each MIGPUMA vintage (2000-based before 2012).
+gen byte vint = year >= 2012
+gen byte same_origin = migrate1d_sp == 23 if new_one & !moved ///
+    & !inlist(migrate1d_sp, 25, 90)
+gen double _wx = perwt * same_origin
+gen double _w  = perwt * (same_origin < .)
+bysort metro vint: egen double _sx = total(_wx)
+bysort metro vint: egen double _sw = total(_w)
+gen double p_m = _sx / _sw if _sw > 0
+drop _wx _w _sx _sw same_origin
+
+* Metro x year x age-group cells. Each partner counts in their own age group.
+gen byte agegrp = .
+forvalues i = 1/`=`nag'-1' {
+    local lo : word `i' of `agecuts'
+    local hi : word `=`i'+1' of `agecuts'
+    replace agegrp = `lo' if age >= `lo' & age < `hi'
+}
+gen double w_one  = perwt * new_one
+gen double w_both = perwt * new_both
+gen double w_amb  = perwt * amb
+gen byte one = 1
+collapse (sum) pop = perwt n_one = w_one n_both = w_both n_amb = w_amb ///
+         nobs = one (mean) p_m, by(metro year vint agegrp)
+
+gen double y_one   = 1000 * n_one / pop
+gen double y_new   = 1000 * (n_one + n_both) / pop
+gen double y_corr  = 1000 * (n_one + n_both / (1 - p_m)) / pop
+gen double y_upper = 1000 * (n_one + n_both + n_amb) / pop
+
+label var pop     "Weighted population of the cell"
+label var nobs    "Unweighted people in the cell"
+label var p_m     "Share of one-moved-in couples whose mover came from the stayer's MIGPUMA"
+label var y_one   "Per 1,000: began living with a partner, one partner moved in"
+label var y_new   "Per 1,000: y_one + both moved from different places"
+label var y_corr  "Per 1,000: y_new with both-moved couples scaled by 1/(1-p)"
+label var y_upper "Per 1,000: y_new + both moved from the same MIGPUMA"
+save "`outdir'/cohab_outcomes_metro_year_age0010.dta", replace
+
+*------------------------------------------------------------------------------
+* 9. 2SLS: rent and new cohabiting couples
+*    lvl: log rent level R_x,      instrument gamma_lo x regional level  (Z_x)
+*    chg: annual rent change dR_x, instrument gamma_lo x regional change (dZ_x)
+*    FE: metro (or metro x MIGPUMA vintage) and division x year, within each
+*        age group; "all" pools the age groups with age-group-specific FE.
+*    Cells weighted by population; SEs clustered by metro.
+*------------------------------------------------------------------------------
+capture which ivreghdfe
+if _rc {
+    di as error "ivreghdfe not found: ssc install ivreghdfe (also ivreg2, ranktest, ftools, reghdfe)"
+    exit 199
+}
+
+* Rent exposure. Under "avg", the first year drops, and so does 2021 when
+* use2020 = 0, because year t-1 is missing.
 preserve
-    collapse (first) gamma_full se_full, by(metro)
-    gen double se2 = se_full^2
-    quietly summarize gamma_full
-    local v = r(Var)
-    quietly summarize se2
-    di "Reliability of gamma_full: " %5.2f 1 - r(mean) / `v'
+    use "`outdir'/rent_instrument_metro_year0010.dta", clear
+    xtset metro year
+    if "`exposure'" == "avg" {
+        gen double R_x  = (lnR   + L.lnR)   / 2
+        gen double Z_x  = (Z_lvl + L.Z_lvl) / 2
+        gen double dR_x = (p     + L.p)     / 2
+        gen double dZ_x = (Z_chg + L.Z_chg) / 2
+    }
+    else {
+        gen double R_x  = lnR
+        gen double Z_x  = Z_lvl
+        gen double dR_x = p
+        gen double dZ_x = Z_chg
+    }
+    keep metro year division R_x Z_x dR_x dZ_x
+    tempfile inst
+    save `inst'
+restore
+merge m:1 metro year using `inst', keep(match) nogen
+
+local mfe metro
+if `vintfe' == 1 local mfe metro#vint
+
+tempname h
+postfile `h' str8 outcome str6 sample str3 spec                      ///
+    double(ymean b_ols se_ols b_rf se_rf b_iv se_iv F) long(N metros) ///
+    using "`outdir'/cohab_2sls_results0010.dta", replace
+
+quietly levelsof agegrp, local(groups)
+foreach spec in lvl chg {
+    if "`spec'" == "lvl" {
+        local x R_x
+        local z Z_x
+    }
+    else {
+        local x dR_x
+        local z dZ_x
+    }
+    foreach y in y_one y_new y_corr y_upper {
+        foreach g in all `groups' {
+            if "`g'" == "all" {
+                local cond
+                local fe  `mfe'#agegrp division#year#agegrp
+                local lab "all"
+            }
+            else {
+                local cond if agegrp == `g'
+                local fe  `mfe' division#year
+                local k   : list posof "`g'" in agecuts
+                local hi  : word `=`k'+1' of `agecuts'
+                local lab "`g'-`=`hi'-1'"
+            }
+
+            capture quietly ivreghdfe `y' (`x' = `z') `cond' [aw = pop], ///
+                absorb(`fe') cluster(metro)
+            if _rc {
+                di as error "2SLS failed: `y', `lab', `spec' (rc = " _rc ")"
+                continue
+            }
+            local b_iv  = _b[`x']
+            local se_iv = _se[`x']
+            local F     = e(widstat)              // Kleibergen-Paap Wald F
+            local N     = e(N)
+
+            tempvar s t
+            gen byte `s' = e(sample)
+            egen byte `t' = tag(metro) if `s'
+            quietly count if `t' == 1
+            local metros = r(N)
+            quietly summarize `y' if `s' [aw = pop]
+            local ymean = r(mean)
+
+            quietly reghdfe `y' `x' if `s' [aw = pop], absorb(`fe') vce(cluster metro)
+            local b_ols  = _b[`x']
+            local se_ols = _se[`x']
+            quietly reghdfe `y' `z' if `s' [aw = pop], absorb(`fe') vce(cluster metro)
+            local b_rf  = _b[`z']
+            local se_rf = _se[`z']
+
+            post `h' ("`y'") ("`lab'") ("`spec'") (`ymean') (`b_ols') (`se_ols') ///
+                (`b_rf') (`se_rf') (`b_iv') (`se_iv') (`F') (`N') (`metros')
+            drop `s' `t'
+        }
+    }
+}
+postclose `h'
+
+preserve
+    use "`outdir'/cohab_2sls_results0010.dta", clear
+    format ymean b_* se_* %9.3f
+    format F %8.1f
+    di as txt _n "Rent and new cohabitants per 1,000 (exposure: `exposure')"
+    list outcome sample spec ymean b_ols b_iv se_iv b_rf F N metros, ///
+        sepby(spec outcome) noobs abbreviate(8)
 restore
 
-* Z_chg first stage by target period
-reghdfe p Z_chg if year <= 2019, absorb(metro division#year) vce(cluster metro)
-reghdfe p Z_chg if year >= 2022, absorb(metro division#year) vce(cluster metro)
