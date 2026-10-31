@@ -16,9 +16,13 @@ local buffer      1       // gamma_lo drops years with |year - target| <= buffer
 local minobs      6       // min annual changes to estimate a metro's gamma
 
 * 2SLS (steps 8-9)
-local extract_p   "`extract'"   // person records with: year perwt gq age marst sploc
+local extract_p1   "usa_00597.dta"   // 2018, 19, 21 person records with: year perwt gq age marst sploc
                                 //   cpuma0010 migrate1d migplac1 migpuma1
                                 //   migrate1d_sp migplac1_sp migpuma1_sp
+local extract_p2   "usa_00596.dta"   // 2015-17 person records with: year perwt gq age marst sploc
+local extract_p3   "usa_00595.dta"   // 2012-14 person records with: year perwt gq age marst sploc	
+local extract_p4   "usa_00594.dta"   // 2009-11 person records with: year perwt gq age marst sploc	
+local extract_p5   "usa_00593.dta"   // 2006-08 person records with: year perwt gq age marst sploc								
 local agecuts     18 25 35 45   // age groups 18-24, 25-34, 35-44
 local exposure    avg     // avg = mean of years t-1 and t (move-ins reported in year t
                           //   happened in the 12 months before the interview); cur = year t
@@ -470,18 +474,53 @@ foreach z in Z_chg Z_chg_full {
 *    unmarried partner in the 12 months before the interview.
 *    One row per metro x year x age group.
 *------------------------------------------------------------------------------
+local extract     "usa_00584.dta"   // IPUMS USA extract (.dta)
+local outdir      "rent_gamma_out"
+local xw_msa      "MSA2013_PUMA2020_crosswalk.xlsx"  // Census: 2013 MSA x 2020 PUMA populations
+local xw_cpuma    "cpuma0010_summary_1.xlsx"         // IPUMS: 2020 PUMAs in each cpuma0010
+local firstyear   2005                // cpuma0010 is available from 2012
+local use2020     0       // 1 = keep 2020 (experimental weights)
+local minshare    0.9    // min share of a CPUMA in its metro: households (step 1), 2020 population (step 1b)
+local addmsa      0       // 1 = add 2013 MSAs that MET2013 does not identify (steps 0a and 1b)
+local maxmismatch .       // drop metros with omission+commission above this (. = keep all)
+local movers      0       // 1 = households that moved in within 12 months only
+local mincell     60     // min unweighted households per metro-year-bedroom cell
+local cyclevel    division  // geography of the leave-out cycle: region or division
+local cyclewt     0       // 1 = weight the cycle by renter households; 0 = equal weighting for all metros
+local buffer      1       // gamma_lo drops years with |year - target| <= buffer
+local minobs      6       // min annual changes to estimate a metro's gamma
+
+* 2SLS (steps 8-9)
+local extract_p1   "usa_00597.dta"   // 2018, 19, 21 person records with: year perwt gq age marst sploc
+                                //   cpuma0010 migrate1d migplac1 migpuma1
+                                //   migrate1d_sp migplac1_sp migpuma1_sp
+local extract_p2   "usa_00596.dta"   // 2015-17 person records with: year perwt gq age marst sploc
+local extract_p3   "usa_00595.dta"   // 2012-14 person records with: year perwt gq age marst sploc	
+local extract_p4   "usa_00594.dta"   // 2009-11 person records with: year perwt gq age marst sploc	
+local extract_p5   "usa_00593.dta"   // 2006-08 person records with: year perwt gq age marst sploc								
+local agecuts     18 25 35 45   // age groups 18-24, 25-34, 35-44
+local exposure    avg     // avg = mean of years t-1 and t (move-ins reported in year t
+                          //   happened in the 12 months before the interview); cur = year t
+local vintfe      0       // 1 = metro x MIGPUMA-vintage FE (MIGPUMA boundaries change in 2012)
 local nag    : word count `agecuts'
 local agemin : word 1 of `agecuts'
 local agemax : word `nag' of `agecuts'
 
-use year perwt gq age marst sploc cpuma0010                          ///
-    migrate1d migplac1 migpuma1 migrate1d_sp migplac1_sp migpuma1_sp ///
-    if year >= `firstyear' & inlist(gq, 1, 2, 5)                      ///
-       & age >= `agemin' & age < `agemax'                             ///
-    using "`extract_p'", clear
+use "`extract_p1'", clear 
+keep if year >= `firstyear' & inlist(gq, 1, 2, 5) & age >= `agemin' & age < `agemax'  
+append using "`extract_p2'"
+keep if year >= `firstyear' & inlist(gq, 1, 2, 5) & age >= `agemin' & age < `agemax'  
+append using "`extract_p3'"
+keep if year >= `firstyear' & inlist(gq, 1, 2, 5) & age >= `agemin' & age < `agemax'  
+append using "`extract_p4'"
+keep if year >= `firstyear' & inlist(gq, 1, 2, 5) & age >= `agemin' & age < `agemax'  
+append using "`extract_p5'"
+keep if year >= `firstyear' & inlist(gq, 1, 2, 5) & age >= `agemin' & age < `agemax'  
+
 if `use2020' == 0 {
     drop if year == 2020
 }
+
 
 merge m:1 cpuma0010 using "`outdir'/cpuma0010_to_met2013.dta", ///
     keepusing(metro) keep(match) nogen
@@ -652,4 +691,3 @@ preserve
     list outcome sample spec ymean b_ols b_iv se_iv b_rf F N metros, ///
         sepby(spec outcome) noobs abbreviate(8)
 restore
-
