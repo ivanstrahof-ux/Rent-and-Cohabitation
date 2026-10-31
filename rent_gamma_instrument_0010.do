@@ -1,13 +1,13 @@
-cd "C:\Users\ivang\Desktop\Paper III Rent and Cohabitation"
+cd "C:\Users\Admin\Desktop\Chapter 3"
 local extract     "usa_00584.dta"   // IPUMS USA extract (.dta)
 local outdir      "rent_gamma_out"
 local xw_msa      "MSA2013_PUMA2020_crosswalk.xlsx"  // Census: 2013 MSA x 2020 PUMA populations
 local xw_cpuma    "cpuma0010_summary_1.xlsx"         // IPUMS: 2020 PUMAs in each cpuma0010
 local firstyear   2005                // cpuma0010 is available from 2012
 local use2020     0       // 1 = keep 2020 (experimental weights)
-local minshare    0.9    // min share of a CPUMA in its metro: households (step 1), 2020 population (step 1b)
+local minshare    0.75    // min share of a CPUMA in its metro: households (step 1), 2020 population (step 1b)
 local addmsa      0       // 1 = add 2013 MSAs that MET2013 does not identify (steps 0a and 1b)
-local maxmismatch .       // drop metros with omission+commission above this (. = keep all)
+local maxmismatch 0.5       // drop metros with omission+commission above this (. = keep all)
 local movers      0       // 1 = households that moved in within 12 months only
 local mincell     60     // min unweighted households per metro-year-bedroom cell
 local cyclevel    division  // geography of the leave-out cycle: region or division
@@ -27,6 +27,14 @@ local agecuts     18 25 35 45   // age groups 18-24, 25-34, 35-44
 local exposure    avg     // avg = mean of years t-1 and t (move-ins reported in year t
                           //   happened in the 12 months before the interview); cur = year t
 local vintfe      0       // 1 = metro x MIGPUMA-vintage FE (MIGPUMA boundaries change in 2012)
+local trends      1       // 1 = metro-specific linear trends in the step-9 level spec
+                          //   (0 = metro and division x year FE only, as before)
+local outcomes    y_one y_new y_corr y_upper h_one h_new h_corr h_upper
+                          //   step-9 outcomes. y_: per 1,000 people (weights: pop);
+                          //   h_: per 1,000 people at risk (weights: atrisk)
+local nag	: word count `agecuts'
+local agemin : word 1 of `agecuts'
+local agemax : word `nag' of `agecuts'
 
 capture mkdir "`outdir'"
 if !inlist("`cyclevel'", "region", "division") {
@@ -35,6 +43,10 @@ if !inlist("`cyclevel'", "region", "division") {
 }
 if !inlist("`exposure'", "avg", "cur") {
     di as error "exposure must be avg or cur"
+    exit 198
+}
+if !inlist("`trends'", "0", "1") {
+    di as error "trends must be 0 or 1"
     exit 198
 }
 
@@ -474,15 +486,16 @@ foreach z in Z_chg Z_chg_full {
 *    unmarried partner in the 12 months before the interview.
 *    One row per metro x year x age group.
 *------------------------------------------------------------------------------
+cd "C:\Users\Admin\Desktop\Chapter 3"
 local extract     "usa_00584.dta"   // IPUMS USA extract (.dta)
 local outdir      "rent_gamma_out"
 local xw_msa      "MSA2013_PUMA2020_crosswalk.xlsx"  // Census: 2013 MSA x 2020 PUMA populations
 local xw_cpuma    "cpuma0010_summary_1.xlsx"         // IPUMS: 2020 PUMAs in each cpuma0010
 local firstyear   2005                // cpuma0010 is available from 2012
 local use2020     0       // 1 = keep 2020 (experimental weights)
-local minshare    0.9    // min share of a CPUMA in its metro: households (step 1), 2020 population (step 1b)
+local minshare    0.75    // min share of a CPUMA in its metro: households (step 1), 2020 population (step 1b)
 local addmsa      0       // 1 = add 2013 MSAs that MET2013 does not identify (steps 0a and 1b)
-local maxmismatch .       // drop metros with omission+commission above this (. = keep all)
+local maxmismatch 0.5       // drop metros with omission+commission above this (. = keep all)
 local movers      0       // 1 = households that moved in within 12 months only
 local mincell     60     // min unweighted households per metro-year-bedroom cell
 local cyclevel    division  // geography of the leave-out cycle: region or division
@@ -502,7 +515,12 @@ local agecuts     18 25 35 45   // age groups 18-24, 25-34, 35-44
 local exposure    avg     // avg = mean of years t-1 and t (move-ins reported in year t
                           //   happened in the 12 months before the interview); cur = year t
 local vintfe      0       // 1 = metro x MIGPUMA-vintage FE (MIGPUMA boundaries change in 2012)
-local nag    : word count `agecuts'
+local trends      1       // 1 = metro-specific linear trends in the step-9 level spec
+                          //   (0 = metro and division x year FE only, as before)
+local outcomes    y_one y_new y_corr y_upper h_one h_new h_corr h_upper
+                          //   step-9 outcomes. y_: per 1,000 people (weights: pop);
+                          //   h_: per 1,000 people at risk (weights: atrisk)
+local nag	: word count `agecuts'
 local agemin : word 1 of `agecuts'
 local agemax : word `nag' of `agecuts'
 
@@ -536,6 +554,7 @@ gen byte diff_origin = migplac1 != migplac1_sp | migpuma1 != migpuma1_sp
 gen byte new_one  = cohab & (moved + moved_sp == 1)           // one partner moved in
 gen byte new_both = cohab & moved & moved_sp &  diff_origin   // both moved, from different places
 gen byte amb      = cohab & moved & moved_sp & !diff_origin   // both moved, same MIGPUMA
+gen byte single   = marst > 2 & !cohab      // at risk: not married, no partner in the household
 
 * p: among couples where one partner moved in, the weighted share whose mover
 * came from the stayer's own migration PUMA. MIGRATE1D 23 = moved within the
@@ -561,14 +580,30 @@ forvalues i = 1/`=`nag'-1' {
 gen double w_one  = perwt * new_one
 gen double w_both = perwt * new_both
 gen double w_amb  = perwt * amb
+gen double w_single = perwt * single
 gen byte one = 1
 collapse (sum) pop = perwt n_one = w_one n_both = w_both n_amb = w_amb ///
-         nobs = one (mean) p_m, by(metro year vint agegrp)
+         n_single = w_single nobs = one (mean) p_m, by(metro year vint agegrp)
 
 gen double y_one   = 1000 * n_one / pop
 gen double y_new   = 1000 * (n_one + n_both) / pop
 gen double y_corr  = 1000 * (n_one + n_both / (1 - p_m)) / pop
 gen double y_upper = 1000 * (n_one + n_both + n_amb) / pop
+
+* Hazards: new cohabitants per 1,000 people at risk, i.e. single a year ago.
+* That is approximated by people single at the interview plus everyone the
+* outcome counts as having just moved in with a partner, who were single a
+* year ago by definition (dividing by current singles alone would shrink
+* the denominator exactly when the numerator grows). h_one and h_new share
+* atrisk, which step 9 uses as the weight for all four hazards.
+gen double n_new   = n_one + n_both
+gen double n_corr  = n_one + n_both / (1 - p_m)
+gen double n_upper = n_new + n_amb
+gen double atrisk  = n_single + n_new
+gen double h_one   = 1000 * n_one   / atrisk
+gen double h_new   = 1000 * n_new   / atrisk
+gen double h_corr  = 1000 * n_corr  / (n_single + n_corr)
+gen double h_upper = 1000 * n_upper / (n_single + n_upper)
 
 label var pop     "Weighted population of the cell"
 label var nobs    "Unweighted people in the cell"
@@ -577,6 +612,15 @@ label var y_one   "Per 1,000: began living with a partner, one partner moved in"
 label var y_new   "Per 1,000: y_one + both moved from different places"
 label var y_corr  "Per 1,000: y_new with both-moved couples scaled by 1/(1-p)"
 label var y_upper "Per 1,000: y_new + both moved from the same MIGPUMA"
+label var n_single "Weighted people single at the interview (not married, no partner)"
+label var n_new    "Weighted new cohabitants: one moved in + both moved, different places"
+label var n_corr   "Weighted new cohabitants, both-moved couples scaled by 1/(1-p)"
+label var n_upper  "Weighted new cohabitants, including both moved from the same MIGPUMA"
+label var atrisk   "Weighted people at risk: n_single + n_new (weight for the hazards)"
+label var h_one    "Per 1,000 at risk: one partner moved in"
+label var h_new    "Per 1,000 at risk: h_one + both moved from different places"
+label var h_corr   "Per 1,000 at risk: h_new with both-moved couples scaled by 1/(1-p)"
+label var h_upper  "Per 1,000 at risk: h_new + both moved from the same MIGPUMA"
 save "`outdir'/cohab_outcomes_metro_year_age0010.dta", replace
 
 *------------------------------------------------------------------------------
@@ -585,8 +629,22 @@ save "`outdir'/cohab_outcomes_metro_year_age0010.dta", replace
 *    chg: annual rent change dR_x, instrument gamma_lo x regional change (dZ_x)
 *    FE: metro (or metro x MIGPUMA vintage) and division x year, within each
 *        age group; "all" pools the age groups with age-group-specific FE.
-*    Cells weighted by population; SEs clustered by metro.
+*    trends = 1 adds metro-specific linear trends to the lvl spec (metro x
+*        age-group trends when pooled), one trend per metro across MIGPUMA
+*        vintages. Step 5 estimates gamma with a constant, so gamma describes
+*        how rents move around each metro's own trend, and the lvl first
+*        stage is strong only once the same trends are removed. The chg spec
+*        gets none: its metro FE already remove each metro's average rent
+*        growth, and trends on top leave it with no first stage (F about 1).
+*    Runs each outcome in the outcomes setting. Cells are weighted by
+*    population for the y_ rates and by population at risk (atrisk) for the
+*    h_ hazards; SEs clustered by metro. The results file records exposure,
+*    vintfe, whether each regression has metro trends, and its weights.
 *------------------------------------------------------------------------------
+if !inlist("`trends'", "0", "1") {
+    di as error "trends must be 0 or 1"
+    exit 198
+}
 capture which ivreghdfe
 if _rc {
     di as error "ivreghdfe not found: ssc install ivreghdfe (also ivreg2, ranktest, ftools, reghdfe)"
@@ -615,41 +673,67 @@ preserve
     save `inst'
 restore
 merge m:1 metro year using `inst', keep(match) nogen
+if "`outcomes'" == "" {
+    di as error "outcomes is empty: set it with the step 8-9 settings"
+    exit 198
+}
+foreach y of local outcomes {
+    capture confirm numeric variable `y'
+    if _rc {
+        di as error "outcome `y' not found: rerun step 8"
+        exit 111
+    }
+}
 
 local mfe metro
 if `vintfe' == 1 local mfe metro#vint
 
+* Metro-specific linear trends (lvl spec, trends = 1)
+gen double trend = year - 2013             // centred
+egen long mg = group(metro agegrp)         // metro x age group, for pooled trends
+
 tempname h
 postfile `h' str8 outcome str6 sample str3 spec                      ///
     double(ymean b_ols se_ols b_rf se_rf b_iv se_iv F) long(N metros) ///
+    str3 exposure byte(trends vintfe) str6 wvar                                 ///
     using "`outdir'/cohab_2sls_results0010.dta", replace
 
 quietly levelsof agegrp, local(groups)
 foreach spec in lvl chg {
     if "`spec'" == "lvl" {
-        local x R_x
-        local z Z_x
+        local x  R_x
+        local z  Z_x
+        local tr `trends'
     }
     else {
-        local x dR_x
-        local z dZ_x
+        local x  dR_x
+        local z  dZ_x
+        local tr 0
     }
-    foreach y in y_one y_new y_corr y_upper {
+    local tfe_all
+    local tfe_grp
+    if `tr' == 1 {
+        local tfe_all mg#c.trend          // pooled: metro x age-group trends
+        local tfe_grp metro#c.trend       // one age group: metro trends
+    }
+    foreach y of local outcomes {
+        local w pop                                     // y_ rates: population
+        if substr("`y'", 1, 2) == "h_" local w atrisk   // h_ hazards: at risk
         foreach g in all `groups' {
             if "`g'" == "all" {
                 local cond
-                local fe  `mfe'#agegrp division#year#agegrp
+                local fe  `mfe'#agegrp division#year#agegrp `tfe_all'
                 local lab "all"
             }
             else {
                 local cond if agegrp == `g'
-                local fe  `mfe' division#year
+                local fe  `mfe' division#year `tfe_grp'
                 local k   : list posof "`g'" in agecuts
                 local hi  : word `=`k'+1' of `agecuts'
                 local lab "`g'-`=`hi'-1'"
             }
 
-            capture quietly ivreghdfe `y' (`x' = `z') `cond' [aw = pop], ///
+            capture quietly ivreghdfe `y' (`x' = `z') `cond' [aw = `w'], ///
                 absorb(`fe') cluster(metro)
             if _rc {
                 di as error "2SLS failed: `y', `lab', `spec' (rc = " _rc ")"
@@ -665,18 +749,19 @@ foreach spec in lvl chg {
             egen byte `t' = tag(metro) if `s'
             quietly count if `t' == 1
             local metros = r(N)
-            quietly summarize `y' if `s' [aw = pop]
+            quietly summarize `y' if `s' [aw = `w']
             local ymean = r(mean)
 
-            quietly reghdfe `y' `x' if `s' [aw = pop], absorb(`fe') vce(cluster metro)
+            quietly reghdfe `y' `x' if `s' [aw = `w'], absorb(`fe') vce(cluster metro)
             local b_ols  = _b[`x']
             local se_ols = _se[`x']
-            quietly reghdfe `y' `z' if `s' [aw = pop], absorb(`fe') vce(cluster metro)
+            quietly reghdfe `y' `z' if `s' [aw = `w'], absorb(`fe') vce(cluster metro)
             local b_rf  = _b[`z']
             local se_rf = _se[`z']
 
             post `h' ("`y'") ("`lab'") ("`spec'") (`ymean') (`b_ols') (`se_ols') ///
-                (`b_rf') (`se_rf') (`b_iv') (`se_iv') (`F') (`N') (`metros')
+                (`b_rf') (`se_rf') (`b_iv') (`se_iv') (`F') (`N') (`metros') ///
+                ("`exposure'") (`tr') (`vintfe') ("`w'")
             drop `s' `t'
         }
     }
@@ -687,7 +772,10 @@ preserve
     use "`outdir'/cohab_2sls_results0010.dta", clear
     format ymean b_* se_* %9.3f
     format F %8.1f
-    di as txt _n "Rent and new cohabitants per 1,000 (exposure: `exposure')"
-    list outcome sample spec ymean b_ols b_iv se_iv b_rf F N metros, ///
+    di as txt _n "Rent and new cohabitants per 1,000 (exposure: `exposure';" ///
+        " metro trends in lvl: `trends'; vintfe: `vintfe')"
+    di as txt "y_: per 1,000 people (weights: pop);" ///
+        " h_: per 1,000 people at risk (weights: atrisk)"
+    list outcome sample spec trends wvar ymean b_ols b_iv se_iv b_rf F N metros, ///
         sepby(spec outcome) noobs abbreviate(8)
 restore
